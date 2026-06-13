@@ -1,0 +1,79 @@
+# smithery.yaml — MedAgent MCP Server listing for Smithery.ai marketplace
+# Docs: https://smithery.ai/docs/config
+
+name: medagent
+displayName: MedAgent — AI-Powered Medical & Multi-Suite Agent
+description: |
+  A multi-suite AI agent platform with 7 specialized tools across Medical, Legal, 
+  Finance, HR, and DevOps domains. The Medical Suite runs a 4-agent diagnostic 
+  pipeline: Symptom Analyzer → Disease Matcher → Risk Assessor → Care Coordinator.
+  All tools powered by Groq (LLaMA 3.3 70B).
+version: "1.0.0"
+license: MIT
+
+# Author info
+author:
+  name: MedAgent Team
+
+# Tags for marketplace discovery
+tags:
+  - medical
+  - healthcare
+  - diagnostics
+  - legal
+  - finance
+  - hr
+  - devops
+  - multi-agent
+  - pipeline
+  - groq
+  - llama
+
+# Docker build config — Smithery builds this
+build:
+  dockerfile: Dockerfile
+  context: .
+
+# Runtime environment variables (user provides these on Smithery dashboard)
+env:
+  - name: GROQ_API_KEY
+    description: "Your Groq API key — get one free at https://console.groq.com"
+    required: true
+    secret: true
+
+# Server transport
+server:
+  port: 3001
+  transport: http
+
+# MCP endpoints exposed by this server
+endpoints:
+  info:
+    path: /mcp/info
+    method: GET
+    description: MCP protocol handshake and server capabilities
+  tools:
+    path: /mcp/tools
+    method: GET
+    description: List all available tools
+  suites:
+    path: /mcp/suites
+    method: GET
+    description: List all agent suites
+  execute:
+    path: /mcp/tools/{toolId}/execute
+    method: POST
+    description: Execute a single tool
+  pipeline:
+    path: /mcp/pipeline/execute
+    method: POST
+    description: Execute a full agent pipeline
+  logs:
+    path: /mcp/logs
+    method: GET
+    description: Real-time execution logs
+
+# Health check path
+healthCheck:
+  path: /health
+  interval: 30
