@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── Real MCP Client ──────────────────────────────────────────────────────
-const MCP_BASE = "/mcp";
-
+const MCP_BASE = import.meta.env.VITE_MCP_URL 
+  ? `${import.meta.env.VITE_MCP_URL}/mcp` 
+  : "/mcp";
 const mcpClient = {
   async getInfo() {
     const r = await fetch(`${MCP_BASE}/info`);

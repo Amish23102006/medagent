@@ -328,6 +328,80 @@ const installedSuites = new Set(["medical"]);
 // Execution history per session
 const executionLog = [];
 
+// ─── Smithery MCP Server Card — Required for marketplace scanning ──────────
+app.get("/.well-known/mcp-server-card.json", (req, res) => {
+  res.json({
+    name: "MedAgent MCP Server",
+    description: "Multi-suite AI agent platform: Medical, Legal, Finance, HR, DevOps",
+    version: "1.0.0",
+    tools: Object.values(TOOL_REGISTRY).map((t) => ({
+      name: t.id,
+      description: t.description,
+      inputSchema: t.inputSchema,
+    })),
+  });
+});
+
+// ─── JSON-RPC endpoint — Smithery standard MCP protocol ───────────────────
+app.post("/mcp", async (req, res) => {
+  const { method, params, id } = req.body;
+
+  if (method === "tools/list") {
+    return res.json({
+      jsonrpc: "2.0", id,
+      result: {
+        tools: Object.values(TOOL_REGISTRY).map((t) => ({
+          name: t.id,
+          description: t.description,
+          inputSchema: t.inputSchema,
+        })),
+      },
+    });
+  }
+
+  if (method === "tools/call") {
+    const toolId = params?.name;
+    const tool = TOOL_REGISTRY[toolId];
+    if (!tool) return res.json({ jsonrpc: "2.0", id, error: { code: -32601, message: `Tool not found: ${toolId}` } });
+
+    try {
+      const input = params?.arguments || {};
+      const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROQ_API_KEY}` },
+        body: JSON.stringify({
+          model: "llama-3.3-70b-versatile",
+          temperature: 0.3,
+          max_tokens: 500,
+          messages: [
+            { role: "system", content: tool.systemPrompt },
+            { role: "user", content: tool.buildPrompt(input) },
+          ],
+        }),
+      });
+      const data = await groqRes.json();
+      if (data.error) throw new Error(data.error.message);
+      const output = data.choices[0].message.content;
+      return res.json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: output }] } });
+    } catch (err) {
+      return res.json({ jsonrpc: "2.0", id, error: { code: -32000, message: err.message } });
+    }
+  }
+
+  if (method === "initialize") {
+    return res.json({
+      jsonrpc: "2.0", id,
+      result: {
+        protocolVersion: "2024-11-05",
+        capabilities: { tools: {} },
+        serverInfo: { name: "MedAgent MCP Server", version: "1.0.0" },
+      },
+    });
+  }
+
+  res.json({ jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } });
+});
+
 // ─── Health Check — Required by Docker & Smithery ─────────────────────────
 app.get("/health", (req, res) => {
   res.json({
