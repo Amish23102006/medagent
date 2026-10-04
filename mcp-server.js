@@ -89,7 +89,7 @@ Respond in this exact format (no extra text):
     name: "Disease Matcher",
     suite: "medical",
     icon: "🧬",
-    tag: "AI Diagnosis",
+    tag: "Possible conditions",
     color: "#a78bfa",
     description: "Matches symptoms to top 3 possible conditions with likelihood.",
     inputSchema: {

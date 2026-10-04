@@ -435,7 +435,7 @@ export default function App() {
               </div>
             )}
             <div style={{ fontSize: 11, color: "#0ea5e9", border: "1px solid #0f2233", borderRadius: 6, padding: "4px 10px" }}>
-              llama-3.3-70b · Groq
+              gpt-oss-120b · Groq
             </div>
           </div>
         </div>
