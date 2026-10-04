@@ -1,5 +1,5 @@
 /**
- * REAL MCP Server — Model Context Protocol over HTTP/SSE
+ * MedAgent MCP Server — MCP tools over HTTP (REST endpoints + minimal JSON-RPC)
  * Each tool is a genuine callable endpoint with schemas,
  * input validation, execution traces, and state passing.
  * 
@@ -22,6 +22,33 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 if (!GROQ_API_KEY) {
   console.error("❌ Missing GROQ_API_KEY in .env");
   process.exit(1);
+}
+
+
+// ─── Groq model config ────────────────────────────────────────────────────
+// llama-3.3-70b-versatile was retired by Groq on 2026-08-16. The model is now
+// configurable so the next retirement is an env-var change, not a code change.
+// If you switch to a non-reasoning model, remove `reasoning_effort` below.
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+
+async function callGroq(messages, maxTokens = 1500) {
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROQ_API_KEY}` },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      temperature: 0.3,
+      max_completion_tokens: maxTokens,
+      reasoning_effort: "low",
+      messages,
+    }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+  if (!data.choices?.[0]?.message?.content) {
+    throw new Error("Model returned empty output (try a higher token limit or lower reasoning effort)");
+  }
+  return data;
 }
 
 // ─── Real Tool Registry ────────────────────────────────────────────────────
@@ -102,12 +129,16 @@ List top 3 conditions only, this exact format:
         gender: { type: "string" },
         symptoms: { type: "string" },
         possible_conditions: { type: "string", description: "Output from disease_matcher" },
+        symptom_analysis: { type: "string", description: "Optional: output from symptom_analyzer (red flags)" },
+        medical_history: { type: "string", description: "Optional medical history" },
       },
     },
     outputKey: "risk_assessment",
     systemPrompt: "You are a triage specialist. Be extremely concise. Use emojis. Max 5 lines.",
     buildPrompt: (input) =>
-      `Patient: ${input.age}yo ${input.gender}. Symptoms: ${input.symptoms}. Conditions: ${input.possible_conditions}
+      `Patient: ${input.age}yo ${input.gender}. Symptoms: ${input.symptoms}. History: ${input.medical_history || "none"}. Analysis: ${input.symptom_analysis || "not provided"}. Conditions: ${input.possible_conditions}
+
+Rule: if the analysis reports a red flag, Risk must be HIGH or CRITICAL and Action must tell the patient to seek emergency care now.
 
 Respond in this exact format:
 🚦 Risk: [CRITICAL/HIGH/MEDIUM/LOW]
@@ -346,6 +377,12 @@ app.get("/.well-known/mcp-server-card.json", (req, res) => {
 app.post("/mcp", async (req, res) => {
   const { method, params, id } = req.body;
 
+  // Notifications (no id) get no JSON-RPC response body; acknowledge with 202.
+  if (id === undefined || (typeof method === "string" && method.startsWith("notifications/"))) {
+    return res.status(202).end();
+  }
+  if (method === "ping") return res.json({ jsonrpc: "2.0", id, result: {} });
+
   if (method === "tools/list") {
     return res.json({
       jsonrpc: "2.0", id,
@@ -366,22 +403,13 @@ app.post("/mcp", async (req, res) => {
 
     try {
       const input = params?.arguments || {};
-      const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROQ_API_KEY}` },
-        body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
-          temperature: 0.3,
-          max_tokens: 500,
-          messages: [
-            { role: "system", content: tool.systemPrompt },
-            { role: "user", content: tool.buildPrompt(input) },
-          ],
-        }),
-      });
-      const data = await groqRes.json();
-      if (data.error) throw new Error(data.error.message);
+      const t0 = Date.now();
+      const data = await callGroq([
+        { role: "system", content: tool.systemPrompt },
+        { role: "user", content: tool.buildPrompt(input) },
+      ]);
       const output = data.choices[0].message.content;
+      logExecution(`✅ ${tool.name} (JSON-RPC) → ${data.usage?.total_tokens || 0} tokens · ${Date.now() - t0}ms`, "success");
       return res.json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: output }] } });
     } catch (err) {
       return res.json({ jsonrpc: "2.0", id, error: { code: -32000, message: err.message } });
@@ -408,6 +436,7 @@ app.get("/health", (req, res) => {
     status: "ok",
     server: "MedAgent MCP Server",
     version: "1.0.0",
+    model: GROQ_MODEL,
     uptime: process.uptime(),
     tools: Object.keys(TOOL_REGISTRY).length,
     suites: Object.keys(AGENT_SUITES).length,
@@ -474,25 +503,10 @@ app.post("/mcp/tools/:toolId/execute", async (req, res) => {
 
   try {
     const prompt = tool.buildPrompt(input);
-    const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        temperature: 0.3,
-        max_tokens: 500,
-        messages: [
-          { role: "system", content: tool.systemPrompt },
-          { role: "user", content: prompt },
-        ],
-      }),
-    });
-
-    const data = await groqRes.json();
-    if (data.error) throw new Error(data.error.message);
+    const data = await callGroq([
+        { role: "system", content: tool.systemPrompt },
+        { role: "user", content: prompt },
+      ]);
 
     const output = data.choices[0].message.content;
     const duration = Date.now() - startTime;
@@ -504,7 +518,7 @@ app.post("/mcp/tools/:toolId/execute", async (req, res) => {
       toolId,
       outputKey: tool.outputKey,
       output,
-      meta: { duration, tokens, model: "llama-3.3-70b-versatile" },
+      meta: { duration, tokens, model: GROQ_MODEL },
     });
   } catch (err) {
     const duration = Date.now() - startTime;
@@ -531,25 +545,10 @@ app.post("/mcp/pipeline/execute", async (req, res) => {
     logExecution(`📡 MCP → Invoking: ${tool.name}`, "tool");
 
     try {
-      const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${GROQ_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
-          temperature: 0.3,
-          max_tokens: 500,
-          messages: [
-            { role: "system", content: tool.systemPrompt },
-            { role: "user", content: tool.buildPrompt(state) },
-          ],
-        }),
-      });
-
-      const data = await groqRes.json();
-      if (data.error) throw new Error(data.error.message);
+      const data = await callGroq([
+        { role: "system", content: tool.systemPrompt },
+        { role: "user", content: tool.buildPrompt(state) },
+      ]);
 
       const output = data.choices[0].message.content;
       const duration = Date.now() - startTime;
@@ -580,7 +579,7 @@ app.get("/mcp/info", (req, res) => {
     protocol: "mcp/1.0",
     server: "MedAgent MCP Server",
     version: "1.0.0",
-    transport: "http+sse",
+    transport: "http",
     capabilities: ["tool_discovery", "tool_execution", "suite_management", "pipeline_execution", "execution_log"],
     tools: Object.keys(TOOL_REGISTRY).length,
     suites: Object.keys(AGENT_SUITES).length,
@@ -592,21 +591,10 @@ app.get("/mcp/info", (req, res) => {
 app.post("/api/chat", async (req, res) => {
   try {
     const { system, userPrompt } = req.body;
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROQ_API_KEY}` },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        temperature: 0.3,
-        max_tokens: 1000,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: userPrompt },
-        ],
-      }),
-    });
-    const data = await response.json();
-    if (data.error) return res.status(500).json({ error: data.error });
+    const data = await callGroq([
+      { role: "system", content: system },
+      { role: "user", content: userPrompt },
+    ]);
     res.json({ content: data.choices[0].message.content });
   } catch (err) {
     res.status(500).json({ error: { message: err.message } });
