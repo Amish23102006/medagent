@@ -1,8 +1,10 @@
 # MedAgent
 
-**A 4-agent symptom-triage pipeline exposed as MCP tools, powered by Groq (LLaMA 3.3 70B).**
+**A 4-agent symptom-triage pipeline exposed as MCP tools, powered by Groq (openai/gpt-oss-120b).**
 
 [Live demo](https://medagent-rust.vercel.app) · [Demo video](#) <!-- TODO: add link -->
+
+> The backend runs on Render's free tier, which sleeps when idle. The first request after a pause can take about a minute.
 
 ![MedAgent screenshot](docs/screenshot.png) <!-- TODO: add screenshot of a completed run -->
 
@@ -34,7 +36,7 @@ The agents are published as tools through the [Model Context Protocol](https://m
 ```
 ┌─────────────────┐   HTTP    ┌──────────────────────┐   API    ┌──────────────┐
 │  React + Vite   │ ────────► │  Node.js MCP server  │ ───────► │  Groq        │
-│  (Vercel)       │           │  (Express, Docker)   │          │  LLaMA 3.3   │
+│  (Vercel)       │           │  (Render, Docker)    │          │  gpt-oss     │
 └─────────────────┘           └──────────────────────┘          └──────────────┘
    Symptom Checker                tool registry
    Marketplace                    pipeline orchestrator
@@ -48,9 +50,10 @@ The agents are published as tools through the [Model Context Protocol](https://m
 | Layer | Technology |
 | --- | --- |
 | Frontend | React, Vite |
-| Backend | Node.js, Express |
-| LLM | Groq, LLaMA 3.3 70B |
+| Backend | Node.js, Express (Docker on Render) |
+| LLM | Groq, openai/gpt-oss-120b (set with `GROQ_MODEL`) |
 | Protocol | Model Context Protocol (MCP) |
+| Hosting | Frontend on Vercel, backend on Render |
 | Packaging | Docker, Smithery |
 
 ## Getting started
@@ -61,7 +64,7 @@ The agents are published as tools through the [Model Context Protocol](https://m
 git clone https://github.com/Amish23102006/medagent
 cd medagent
 npm install
-cp .env.example .env   # then add your GROQ_API_KEY
+cp .env.example .env   # then add GROQ_API_KEY (optionally GROQ_MODEL)
 npm run dev            # starts the MCP server (port 3001) and Vite (port 5173)
 ```
 
@@ -74,10 +77,24 @@ docker build -t medagent .
 docker run -p 3001:3001 -e GROQ_API_KEY=your_key medagent
 ```
 
+## Deployment
+
+**Backend (Render)**
+- Create a Render **Web Service** from this repo, with branch `main` and runtime **Docker**.
+- Set the environment variable `GROQ_API_KEY`. `GROQ_MODEL` is optional (default `openai/gpt-oss-120b`). Render provides `PORT` automatically.
+- Set Auto-Deploy to **On Commit** so each push to `main` redeploys the server.
+- Health check path: `/health`. It also reports the active model.
+
+**Frontend (Vercel)**
+- Import the repo in Vercel (Vite preset).
+- Set `VITE_MCP_URL` to the Render service URL, with no trailing slash (for example `https://your-service.onrender.com`). The app appends `/mcp` itself.
+- Redeploy after changing the variable, because Vite reads it at build time.
+
 ## API endpoints
 
 | Method | Path | Description |
 | --- | --- | --- |
+| POST | `/mcp` | JSON-RPC 2.0 MCP endpoint (`initialize`, `tools/list`, `tools/call`, `ping`) |
 | GET | `/mcp/info` | Server info and capabilities |
 | GET | `/mcp/tools` | List available tools |
 | GET | `/mcp/suites` | List agent suites |
@@ -90,8 +107,8 @@ docker run -p 3001:3001 -e GROQ_API_KEY=your_key medagent
 
 - Outputs come from a general-purpose LLM and can be wrong, incomplete or overconfident.
 - The pipeline is not validated against clinical data or reviewed by clinicians.
-- The Risk Assessor is designed to escalate serious symptoms to emergency care, but it must never be relied on in a real emergency.
-- No user health data should be stored. Do not submit real patient information.
+- The Risk Assessor receives the Symptom Analyzer's red-flag output and is instructed to rate such cases HIGH or CRITICAL and advise emergency care. It must never be relied on in a real emergency.
+- The server does not store submitted text, but the text is sent to the Groq API for inference. Do not submit real patient information.
 
 ## Evaluation
 
