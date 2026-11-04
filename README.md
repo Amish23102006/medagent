@@ -2,7 +2,7 @@
 
 **A 4-agent symptom-triage pipeline exposed as MCP tools, powered by Groq (openai/gpt-oss-120b).**
 
-[Live demo](https://medagent-rust.vercel.app) · [Demo video](#) <!-- TODO: add link -->
+[Live demo](https://medagent-rust.vercel.app)
 
 > The backend runs on Render's free tier, which sleeps when idle. The first request after a pause can take about a minute.
 
