@@ -1,23 +1,46 @@
 name: Daily health check
 
-# Pings the live MedAgent demo every day at 10:00 IST and appends the result
-# to status/uptime.md. The job fails (and GitHub emails you) if the backend is down.
+# Pings the live MedAgent demo every day around 10:00 IST and appends the result
+# to status/uptime.md (one commit per day, authored by Amish).
+# A backup run in the afternoon only commits if the morning run was missed,
+# so a day is never skipped. The job fails (and GitHub emails you) if the backend is down.
 on:
   schedule:
-    - cron: "30 4 * * *" # 04:30 UTC = 10:00 IST
+    - cron: "30 4 * * *" # 04:30 UTC = 10:00 IST (main run)
+    - cron: "17 10 * * *" # 10:17 UTC = 15:47 IST (backup, skips if already logged)
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: health-check
+  cancel-in-progress: false
+
 jobs:
   health:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Skip if today is already logged
+        id: guard
+        run: |
+          today=$(TZ=Asia/Kolkata date +%F)
+          echo "today=$today" >> "$GITHUB_OUTPUT"
+          if [ -f status/uptime.md ] && grep -q "^| $today |" status/uptime.md; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Already logged $today, nothing to do."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Check backend and frontend
         id: ping
+        if: steps.guard.outputs.skip != 'true'
         run: |
           check() {
             local url="$1" out="000 0"
@@ -28,9 +51,9 @@ jobs:
             done
             echo "$out"
           }
-          read -r b_code b_time <<< "$(check https://medagent-oewu.onrender.com/health)"
-          read -r f_code f_time <<< "$(check https://medagent-rust.vercel.app)"
-          echo "backend=$b_code" >> "$GITHUB_OUTPUT"
+          read -r b_code b_time <<< "$(check https://medagent-oewu.onrender.com/health)" || true
+          read -r f_code f_time <<< "$(check https://medagent-rust.vercel.app)" || true
+          echo "backend=${b_code:-000}" >> "$GITHUB_OUTPUT"
 
           f=status/uptime.md
           mkdir -p status
@@ -41,23 +64,27 @@ jobs:
               echo "Automated daily check of the live demo (10:00 IST) by \`.github/workflows/health-check.yml\`."
               echo "The backend runs on Render's free tier, so backend time can include cold start."
               echo
-              echo "| Date (UTC) | Backend /health | Backend time (s) | Frontend | Frontend time (s) |"
+              echo "| Date (IST) | Backend /health | Backend time (s) | Frontend | Frontend time (s) |"
               echo "|---|---|---|---|---|"
             } > "$f"
           fi
-          echo "| $(date -u +%F) | $b_code | $b_time | $f_code | $f_time |" >> "$f"
+          echo "| ${{ steps.guard.outputs.today }} | ${b_code:-000} | ${b_time:-0} | ${f_code:-000} | ${f_time:-0} |" >> "$f"
 
       - name: Commit log
+        if: always() && steps.guard.outputs.skip != 'true'
         run: |
           git config user.name "Amish Chaturvedi"
           git config user.email "291602092+Amish23102006@users.noreply.github.com"
           git add status/uptime.md
-          git commit -m "chore(status): daily health check $(date -u +%F)" || exit 0
-          git pull --rebase
-          git push
+          git commit -m "chore(status): daily health check ${{ steps.guard.outputs.today }}" || exit 0
+          for i in 1 2 3; do
+            git pull --rebase && git push && exit 0
+            sleep 10
+          done
+          exit 1
 
       - name: Fail if backend is down
-        if: steps.ping.outputs.backend != '200'
+        if: steps.guard.outputs.skip != 'true' && steps.ping.outputs.backend != '200'
         run: |
           echo "Backend /health returned ${{ steps.ping.outputs.backend }}"
           exit 1
