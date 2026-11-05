@@ -1,0 +1,63 @@
+name: Daily health check
+
+# Pings the live MedAgent demo every day at 10:00 IST and appends the result
+# to status/uptime.md. The job fails (and GitHub emails you) if the backend is down.
+on:
+  schedule:
+    - cron: "30 4 * * *" # 04:30 UTC = 10:00 IST
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check backend and frontend
+        id: ping
+        run: |
+          check() {
+            local url="$1" out="000 0"
+            for i in 1 2 3; do
+              out=$(curl -s -o /dev/null -w "%{http_code} %{time_total}" --max-time 90 "$url" || true)
+              [ "${out%% *}" = "200" ] && break
+              sleep 20
+            done
+            echo "$out"
+          }
+          read -r b_code b_time <<< "$(check https://medagent-oewu.onrender.com/health)"
+          read -r f_code f_time <<< "$(check https://medagent-rust.vercel.app)"
+          echo "backend=$b_code" >> "$GITHUB_OUTPUT"
+
+          f=status/uptime.md
+          mkdir -p status
+          if [ ! -f "$f" ]; then
+            {
+              echo "# MedAgent uptime log"
+              echo
+              echo "Automated daily check of the live demo (10:00 IST) by \`.github/workflows/health-check.yml\`."
+              echo "The backend runs on Render's free tier, so backend time can include cold start."
+              echo
+              echo "| Date (UTC) | Backend /health | Backend time (s) | Frontend | Frontend time (s) |"
+              echo "|---|---|---|---|---|"
+            } > "$f"
+          fi
+          echo "| $(date -u +%F) | $b_code | $b_time | $f_code | $f_time |" >> "$f"
+
+      - name: Commit log
+        run: |
+          git config user.name "Amish Chaturvedi"
+          git config user.email "291602092+Amish23102006@users.noreply.github.com"
+          git add status/uptime.md
+          git commit -m "chore(status): daily health check $(date -u +%F)" || exit 0
+          git pull --rebase
+          git push
+
+      - name: Fail if backend is down
+        if: steps.ping.outputs.backend != '200'
+        run: |
+          echo "Backend /health returned ${{ steps.ping.outputs.backend }}"
+          exit 1
