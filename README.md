@@ -6,6 +6,8 @@
 
 > The backend runs on Render's free tier, which sleeps when idle. The first request after a pause can take about a minute.
 
+![MedAgent running the Cardiac Alert sample: the Symptom Analyzer flags a red flag and the Risk Assessor rates the case HIGH](docs/screenshot.png)
+
 > **Medical disclaimer:** MedAgent is an educational and research demo. It is **not** a medical device and does not provide diagnosis or medical advice. Do not enter real personal health information. In an emergency, call your local emergency number.
 
 ## What it does
