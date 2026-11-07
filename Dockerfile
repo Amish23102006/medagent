@@ -6,8 +6,8 @@ WORKDIR /app
 # Copy package files first (better Docker layer caching)
 COPY package*.json ./
 
-# Install all dependencies
-RUN npm ci
+# Install only production dependencies (the React/Vite frontend is not needed here)
+RUN npm ci --omit=dev
 
 # Copy source
 COPY mcp-server.js ./
@@ -27,7 +27,7 @@ EXPOSE 3001
 
 # Health check — Smithery uses this to verify the container is alive
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3001/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3001}/health || exit 1
 
 # Run the server
 CMD ["node", "mcp-server.js"]

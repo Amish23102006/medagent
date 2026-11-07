@@ -1,12 +1,12 @@
 /**
- * MedAgent MCP Server — MCP tools over HTTP (REST endpoints + minimal JSON-RPC)
- * Each tool is a genuine callable endpoint with schemas,
- * input validation, execution traces, and state passing.
- * 
- * Updated for Smithery.ai deployment:
- * - /health endpoint for Docker healthcheck
+ * MedAgent MCP Server — MCP tools over HTTP (REST endpoints + core JSON-RPC methods)
+ * Each tool has a JSON Schema; inputs are validated against it before any
+ * LLM call. Agents share state, and a red flag from the Symptom Analyzer is
+ * escalated in code, not only by prompt.
+ *
+ * - /health endpoint for the Docker healthcheck
  * - PORT from environment variable
- * - CORS allows all origins for remote access
+ * - CORS allows all origins; LLM-calling routes are rate-limited per IP
  */
 import express from "express";
 import cors from "cors";
@@ -15,6 +15,7 @@ import * as dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
+app.set("trust proxy", 1); // Render sits behind a proxy; needed for per-IP rate limits
 app.use(cors());
 app.use(express.json());
 
@@ -31,9 +32,16 @@ if (!GROQ_API_KEY) {
 // If you switch to a non-reasoning model, remove `reasoning_effort` below.
 const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
 
+const GROQ_TIMEOUT_MS = Number(process.env.GROQ_TIMEOUT_MS) || 30000;
+
 async function callGroq(messages, maxTokens = 1500) {
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GROQ_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
+    signal: controller.signal,
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${GROQ_API_KEY}` },
     body: JSON.stringify({
       model: GROQ_MODEL,
@@ -43,6 +51,12 @@ async function callGroq(messages, maxTokens = 1500) {
       messages,
     }),
   });
+  } catch (err) {
+    if (err.name === "AbortError") throw new Error(`Model request timed out after ${GROQ_TIMEOUT_MS}ms`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   const data = await res.json();
   if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
   if (!data.choices?.[0]?.message?.content) {
@@ -353,7 +367,76 @@ const AGENT_SUITES = {
   },
 };
 
-// In-memory installed suites state
+// ─── Input validation ─────────────────────────────────────────────────────
+// Checks input against a tool's inputSchema: required fields, basic types and
+// enums. Numeric strings are accepted for "number" fields (HTML forms send
+// strings) and converted. Returns { value, errors }.
+function validateInput(schema, input) {
+  const errors = [];
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { value: null, errors: ["Input must be a JSON object"] };
+  }
+  const value = { ...input };
+  for (const key of schema?.required || []) {
+    if (value[key] === undefined || value[key] === null || value[key] === "") {
+      errors.push(`Missing required field: ${key}`);
+    }
+  }
+  for (const [key, prop] of Object.entries(schema?.properties || {})) {
+    const v = value[key];
+    if (v === undefined || v === null || v === "") continue;
+    if (prop.type === "number") {
+      const n = typeof v === "string" ? Number(v) : v;
+      if (typeof n !== "number" || !Number.isFinite(n)) errors.push(`${key} must be a number`);
+      else if (n < 0 || n > 150) errors.push(`${key} must be between 0 and 150`);
+      else value[key] = n;
+    } else if (prop.type === "string") {
+      if (typeof v !== "string") errors.push(`${key} must be a string`);
+      else if (v.length > 4000) errors.push(`${key} is too long (max 4000 characters)`);
+    }
+    if (prop.enum && !prop.enum.includes(value[key])) {
+      errors.push(`${key} must be one of: ${prop.enum.join(", ")}`);
+    }
+  }
+  return { value, errors };
+}
+
+// ─── Red-flag safety rule, enforced in code ───────────────────────────────
+// The Risk Assessor prompt asks for HIGH/CRITICAL when a red flag exists, but
+// an LLM can ignore instructions. If the analysis says "Red Flag: Yes" and
+// the model rated MEDIUM or LOW, the output is escalated here.
+function enforceRedFlag(toolId, state, output) {
+  if (toolId !== "risk_assessor") return output;
+  const redFlag = /red flag:\s*yes/i.test(state.symptom_analysis || "");
+  if (!redFlag) return output;
+  const level = (output.match(/\b(CRITICAL|HIGH|MEDIUM|LOW)\b/) || [])[1];
+  if (level === "CRITICAL" || level === "HIGH") return output;
+  return "⚠️ Risk: HIGH (escalated automatically: the Symptom Analyzer reported a red flag)\n" +
+    "Action: Seek emergency or same-day medical care.\n\n" +
+    "Original model assessment:\n" + output;
+}
+
+// ─── Simple per-IP rate limit for routes that call the LLM ────────────────
+const RATE_LIMIT = Number(process.env.RATE_LIMIT_PER_MIN) || 20;
+const rateBuckets = new Map();
+function rateLimit(req, res, next) {
+  const now = Date.now();
+  const key = req.ip;
+  const bucket = (rateBuckets.get(key) || []).filter((t) => now - t < 60000);
+  if (bucket.length >= RATE_LIMIT) {
+    rateBuckets.set(key, bucket);
+    return res.status(429).json({ error: "Too many requests. Please wait a minute and try again." });
+  }
+  bucket.push(now);
+  rateBuckets.set(key, bucket);
+  next();
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of rateBuckets) if (!v.some((t) => now - t < 60000)) rateBuckets.delete(k);
+}, 60000).unref();
+
+// In-memory installed suites state (shared by all users; resets on restart)
 const installedSuites = new Set(["medical"]);
 
 // Execution history per session
@@ -374,8 +457,13 @@ app.get("/.well-known/mcp-server-card.json", (req, res) => {
 });
 
 // ─── JSON-RPC endpoint — Smithery standard MCP protocol ───────────────────
-app.post("/mcp", async (req, res) => {
-  const { method, params, id } = req.body;
+const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
+app.post("/mcp", async (req, res, next) => {
+  if (req.body?.method === "tools/call") return rateLimit(req, res, next);
+  next();
+}, async (req, res) => {
+  const { method, params, id } = req.body || {};
 
   // Notifications (no id) get no JSON-RPC response body; acknowledge with 202.
   if (id === undefined || (typeof method === "string" && method.startsWith("notifications/"))) {
@@ -401,14 +489,17 @@ app.post("/mcp", async (req, res) => {
     const tool = TOOL_REGISTRY[toolId];
     if (!tool) return res.json({ jsonrpc: "2.0", id, error: { code: -32601, message: `Tool not found: ${toolId}` } });
 
+    const { value: input, errors } = validateInput(tool.inputSchema, params?.arguments || {});
+    if (errors.length) {
+      return res.json({ jsonrpc: "2.0", id, error: { code: -32602, message: "Invalid params", data: { errors } } });
+    }
     try {
-      const input = params?.arguments || {};
       const t0 = Date.now();
       const data = await callGroq([
         { role: "system", content: tool.systemPrompt },
         { role: "user", content: tool.buildPrompt(input) },
       ]);
-      const output = data.choices[0].message.content;
+      const output = enforceRedFlag(toolId, input, data.choices[0].message.content);
       logExecution(`✅ ${tool.name} (JSON-RPC) → ${data.usage?.total_tokens || 0} tokens · ${Date.now() - t0}ms`, "success");
       return res.json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: output }] } });
     } catch (err) {
@@ -420,7 +511,10 @@ app.post("/mcp", async (req, res) => {
     return res.json({
       jsonrpc: "2.0", id,
       result: {
-        protocolVersion: "2024-11-05",
+        // Echo the client's version if we support it, otherwise offer our latest.
+        protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.includes(params?.protocolVersion)
+          ? params.protocolVersion
+          : SUPPORTED_PROTOCOL_VERSIONS[0],
         capabilities: { tools: {} },
         serverInfo: { name: "MedAgent MCP Server", version: "1.0.0" },
       },
@@ -484,6 +578,7 @@ app.post("/mcp/suites/:suiteId/install", (req, res) => {
 // 4. Uninstall a suite (medical can't be uninstalled)
 app.post("/mcp/suites/:suiteId/uninstall", (req, res) => {
   const { suiteId } = req.params;
+  if (!AGENT_SUITES[suiteId]) return res.status(404).json({ error: "Suite not found" });
   if (suiteId === "medical") return res.status(400).json({ error: "Core suite cannot be uninstalled" });
   installedSuites.delete(suiteId);
   logExecution(`🗑️ Suite uninstalled: ${AGENT_SUITES[suiteId]?.name}`, "system");
@@ -491,12 +586,16 @@ app.post("/mcp/suites/:suiteId/uninstall", (req, res) => {
 });
 
 // 5. Execute a single tool — REAL AI call
-app.post("/mcp/tools/:toolId/execute", async (req, res) => {
+app.post("/mcp/tools/:toolId/execute", rateLimit, async (req, res) => {
   const { toolId } = req.params;
   const tool = TOOL_REGISTRY[toolId];
   if (!tool) return res.status(404).json({ error: `Tool not found: ${toolId}` });
+  if (!installedSuites.has(tool.suite)) {
+    return res.status(400).json({ error: `Suite not installed: ${tool.suite}` });
+  }
 
-  const input = req.body;
+  const { value: input, errors } = validateInput(tool.inputSchema, req.body);
+  if (errors.length) return res.status(400).json({ error: "Invalid input", details: errors });
   const startTime = Date.now();
 
   logExecution(`📡 MCP → Invoking: ${tool.name} [${toolId}]`, "tool");
@@ -508,7 +607,7 @@ app.post("/mcp/tools/:toolId/execute", async (req, res) => {
         { role: "user", content: prompt },
       ]);
 
-    const output = data.choices[0].message.content;
+    const output = enforceRedFlag(toolId, input, data.choices[0].message.content);
     const duration = Date.now() - startTime;
     const tokens = data.usage?.total_tokens || 0;
 
@@ -528,15 +627,20 @@ app.post("/mcp/tools/:toolId/execute", async (req, res) => {
 });
 
 // 6. Execute a full pipeline
-app.post("/mcp/pipeline/execute", async (req, res) => {
-  const { suiteId, input } = req.body;
+app.post("/mcp/pipeline/execute", rateLimit, async (req, res) => {
+  const { suiteId, input } = req.body || {};
   const suite = AGENT_SUITES[suiteId];
   if (!suite) return res.status(404).json({ error: "Suite not found" });
   if (!installedSuites.has(suiteId)) return res.status(400).json({ error: "Suite not installed" });
 
+  // Validate against the first tool's schema (later tools get their inputs from state).
+  const firstTool = TOOL_REGISTRY[suite.pipeline[0]];
+  const { value: checked, errors } = validateInput(firstTool.inputSchema, input);
+  if (errors.length) return res.status(400).json({ error: "Invalid input", details: errors });
+
   logExecution(`🚀 Pipeline started: ${suite.name}`, "system");
 
-  const state = { ...input };
+  const state = { ...checked };
   const results = [];
 
   for (const toolId of suite.pipeline) {
@@ -550,7 +654,7 @@ app.post("/mcp/pipeline/execute", async (req, res) => {
         { role: "user", content: tool.buildPrompt(state) },
       ]);
 
-      const output = data.choices[0].message.content;
+      const output = enforceRedFlag(toolId, state, data.choices[0].message.content);
       const duration = Date.now() - startTime;
       const tokens = data.usage?.total_tokens || 0;
 
@@ -585,20 +689,6 @@ app.get("/mcp/info", (req, res) => {
     suites: Object.keys(AGENT_SUITES).length,
     installedSuites: [...installedSuites],
   });
-});
-
-// ─── Proxy endpoint for frontend ─────────────────────────────────────────
-app.post("/api/chat", async (req, res) => {
-  try {
-    const { system, userPrompt } = req.body;
-    const data = await callGroq([
-      { role: "system", content: system },
-      { role: "user", content: userPrompt },
-    ]);
-    res.json({ content: data.choices[0].message.content });
-  } catch (err) {
-    res.status(500).json({ error: { message: err.message } });
-  }
 });
 
 // ─── Helper ───────────────────────────────────────────────────────────────

@@ -6,8 +6,6 @@
 
 > The backend runs on Render's free tier, which sleeps when idle. The first request after a pause can take about a minute.
 
-![MedAgent screenshot](docs/screenshot.png) <!-- TODO: add screenshot of a completed run -->
-
 > **Medical disclaimer:** MedAgent is an educational and research demo. It is **not** a medical device and does not provide diagnosis or medical advice. Do not enter real personal health information. In an emergency, call your local emergency number.
 
 ## What it does
@@ -43,8 +41,6 @@ The agents are published as tools through the [Model Context Protocol](https://m
    MCP Console                    execution logs
 ```
 
-<!-- TODO: replace with a proper diagram image if you make one -->
-
 ## Tech stack
 
 | Layer | Technology |
@@ -54,7 +50,8 @@ The agents are published as tools through the [Model Context Protocol](https://m
 | LLM | Groq, openai/gpt-oss-120b (set with `GROQ_MODEL`) |
 | Protocol | Model Context Protocol (MCP) |
 | Hosting | Frontend on Vercel, backend on Render |
-| Packaging | Docker, Smithery |
+| Packaging | Docker (Smithery config included) |
+| Testing | Node's built-in test runner, GitHub Actions CI |
 
 ## Getting started
 
@@ -103,23 +100,28 @@ docker run -p 3001:3001 -e GROQ_API_KEY=your_key medagent
 | GET | `/mcp/logs` | Recent execution logs |
 | GET | `/health` | Health check |
 
+Inputs are validated against each tool's JSON Schema before any model call. Invalid REST requests return `400` with a list of problems, and invalid JSON-RPC `tools/call` arguments return error `-32602`. Routes that call the model are rate-limited per IP (`RATE_LIMIT_PER_MIN`, default 20), and model calls time out after `GROQ_TIMEOUT_MS` (default 30 seconds).
+
 ## Safety and limitations
 
 - Outputs come from a general-purpose LLM and can be wrong, incomplete or overconfident.
 - The pipeline is not validated against clinical data or reviewed by clinicians.
-- The Risk Assessor receives the Symptom Analyzer's red-flag output and is instructed to rate such cases HIGH or CRITICAL and advise emergency care. It must never be relied on in a real emergency.
+- **Red-flag escalation is enforced in code.** The Risk Assessor is instructed to rate red-flag cases HIGH or CRITICAL. If the Symptom Analyzer reports `Red Flag: Yes` and the model still answers MEDIUM or LOW, the server escalates the result to HIGH and adds emergency-care advice. MedAgent must still never be relied on in a real emergency.
 - The server does not store submitted text, but the text is sent to the Groq API for inference. Do not submit real patient information.
+- Installed suites and execution logs are held in memory, shared by all users and reset when the server restarts.
+- The MCP endpoint implements the core JSON-RPC methods with protocol-version negotiation, but not the full Streamable HTTP transport (sessions and SSE streaming).
 
 ## Evaluation
 
-<!-- TODO: fill in after running a benchmark -->
-Planned: compare the 4-agent pipeline against a single-prompt baseline on a public symptom or medical QA dataset, reporting accuracy, latency and cost per query, with an ablation of each agent.
+Not run yet. Planned: compare the 4-agent pipeline against a single-prompt baseline on a public symptom or medical QA dataset, reporting accuracy, latency and cost per query, with an ablation of each agent.
 
 ## Roadmap
 
+- [x] Automated tests and CI
+- [x] Input validation against each tool's JSON Schema
+- [x] Code-level red-flag escalation, rate limiting and model-call timeouts
 - [ ] Streamable HTTP transport that follows the official MCP specification, built on the MCP SDK
 - [ ] Benchmark and ablation results
-- [ ] Automated tests and CI
 - [ ] Authentication and per-user run history
 - [ ] More specialised agents
 
