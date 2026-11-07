@@ -121,3 +121,57 @@ test("POST /mcp/pipeline/execute with an unknown suite returns 404", async () =>
   });
   assert.equal(res.status, 404);
 });
+
+const post = (url, body) =>
+  fetch(`${BASE}${url}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+test("initialize echoes a supported client protocol version", async () => {
+  const body = await (await rpc("initialize", { protocolVersion: "2025-03-26" })).json();
+  assert.equal(body.result.protocolVersion, "2025-03-26");
+});
+
+test("initialize offers the latest version for an unknown client version", async () => {
+  const body = await (await rpc("initialize", { protocolVersion: "1999-01-01" })).json();
+  assert.equal(body.result.protocolVersion, "2025-06-18");
+});
+
+test("tool execute rejects missing required fields with 400 before calling the LLM", async () => {
+  const res = await post("/mcp/tools/symptom_analyzer/execute", { gender: "male" });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.ok(body.details.some((d) => d.includes("age")));
+  assert.ok(body.details.some((d) => d.includes("symptoms")));
+});
+
+test("tool execute rejects a non-numeric age and an invalid gender", async () => {
+  const res = await post("/mcp/tools/symptom_analyzer/execute", { age: "abc", gender: "x", symptoms: "fever" });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.ok(body.details.some((d) => d.includes("age must be a number")));
+  assert.ok(body.details.some((d) => d.includes("gender must be one of")));
+});
+
+test("JSON-RPC tools/call with invalid arguments returns -32602", async () => {
+  const body = await (await rpc("tools/call", { name: "symptom_analyzer", arguments: {} })).json();
+  assert.equal(body.error.code, -32602);
+});
+
+test("pipeline execute validates input", async () => {
+  const res = await post("/mcp/pipeline/execute", { suiteId: "medical", input: { age: 30 } });
+  assert.equal(res.status, 400);
+});
+
+test("tools from a suite that is not installed cannot be executed", async () => {
+  const res = await post("/mcp/tools/legal_advisor/execute", { query: "test" });
+  assert.equal(res.status, 400);
+});
+
+test("the open /api/chat proxy has been removed", async () => {
+  const res = await post("/api/chat", { system: "x", userPrompt: "y" });
+  assert.equal(res.status, 404);
+});
+
+test("uninstalling an unknown suite returns 404", async () => {
+  const res = await post("/mcp/suites/nope/uninstall", {});
+  assert.equal(res.status, 404);
+});
