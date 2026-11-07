@@ -31,7 +31,9 @@ const mcpClient = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
     });
-    return r.json();
+    const data = await r.json();
+    if (!r.ok && data.details) data.error = `${data.error}: ${data.details.join("; ")}`;
+    return data;
   },
   async executePipeline(suiteId, input) {
     const r = await fetch(`${MCP_BASE}/pipeline/execute`, {
@@ -353,7 +355,7 @@ export default function App() {
   // Run medical pipeline via MCP pipeline endpoint
   const runPipeline = async () => {
     if (!form.age || !form.symptoms) return;
-    setPipeline({ running: true, currentStep: 0, results: {}, metas: {} });
+    setPipeline({ running: true, currentStep: 0, results: {}, metas: {}, error: null });
 
     const medTools = tools.filter(t => t.suite === "medical");
     const state = { ...form, age: Number(form.age) };
@@ -372,6 +374,7 @@ export default function App() {
         setPipeline(p => ({ ...p, results: { ...results }, metas: { ...metas } }));
       } catch (err) {
         console.error(err);
+        setPipeline(p => ({ ...p, error: `${tool.name} failed: ${err.message}` }));
         break;
       }
     }
@@ -480,6 +483,11 @@ export default function App() {
                 style={{ width: "100%", padding: "14px", borderRadius: 12, cursor: pipeline.running ? "not-allowed" : "pointer", background: pipeline.running ? "#0f1e2e" : "linear-gradient(135deg,#0ea5e9,#6366f1)", border: "none", color: pipeline.running ? "#334155" : "white", fontSize: 14, fontWeight: 700, boxShadow: pipeline.running ? "none" : "0 4px 20px #0ea5e944" }}>
                 {pipeline.running ? "⚡ Running MCP Pipeline…" : "▶ Run Agent Pipeline"}
               </button>
+              {pipeline.error && (
+                <div role="alert" style={{ marginTop: 12, padding: "10px 14px", borderRadius: 10, background: "#7f1d1d33", border: "1px solid #ef444466", color: "#fca5a5", fontSize: 13 }}>
+                  ⚠️ {pipeline.error}. Please try again; the free server can take up to a minute to wake up.
+                </div>
+              )}
 
               <div style={{ marginTop: 24 }}>
                 <div style={{ color: "#334155", fontSize: 11, fontWeight: 700, letterSpacing: 1, marginBottom: 10, textTransform: "uppercase" }}>Quick Samples</div>
