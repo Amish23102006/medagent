@@ -1,5 +1,5 @@
 # ── Build Stage ──────────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -13,7 +13,7 @@ RUN npm ci --omit=dev
 COPY mcp-server.js ./
 
 # ── Production Stage ──────────────────────────────────────────────────────────
-FROM node:20-alpine AS production
+FROM node:22-alpine AS production
 
 WORKDIR /app
 
