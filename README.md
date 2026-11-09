@@ -57,7 +57,7 @@ The agents are published as tools through the [Model Context Protocol](https://m
 
 ## Getting started
 
-**Requirements:** Node.js 18+ and a free [Groq API key](https://console.groq.com).
+**Requirements:** Node.js 22+ and a free [Groq API key](https://console.groq.com).
 
 ```bash
 git clone https://github.com/Amish23102006/medagent
