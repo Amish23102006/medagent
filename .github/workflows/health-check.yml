@@ -3,7 +3,11 @@ name: Daily health check
 # Pings the live MedAgent demo every day around 10:00 IST and appends the result
 # to status/uptime.md (one commit per day, authored by Amish).
 # A backup run in the afternoon only commits if the morning run was missed,
-# so a day is never skipped. The job fails (and GitHub emails you) if the backend is down.
+# so a day is never skipped. If the morning run logged the backend as down, the backup
+# run checks again and replaces that row. The backend is on Render's free tier, which
+# can take several minutes to wake up, so the check sends a wake-up ping and keeps
+# retrying for up to ~10 minutes before calling it down.
+# The job fails (and GitHub emails you) only if the backend is still down after that.
 on:
   schedule:
     - cron: "30 4 * * *" # 04:30 UTC = 10:00 IST (main run)
@@ -19,10 +23,10 @@ concurrency:
 
 jobs:
   health:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -31,9 +35,9 @@ jobs:
         run: |
           today=$(TZ=Asia/Kolkata date +%F)
           echo "today=$today" >> "$GITHUB_OUTPUT"
-          if [ -f status/uptime.md ] && grep -q "^| $today |" status/uptime.md; then
+          if [ -f status/uptime.md ] && grep -q "^| $today | 200 |" status/uptime.md; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Already logged $today, nothing to do."
+            echo "Already logged $today with a healthy backend, nothing to do."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
@@ -42,21 +46,27 @@ jobs:
         id: ping
         if: steps.guard.outputs.skip != 'true'
         run: |
+          # check URL ATTEMPTS: retry until HTTP 200 or attempts run out
           check() {
-            local url="$1" out="000 0"
-            for i in 1 2 3; do
-              out=$(curl -s -o /dev/null -w "%{http_code} %{time_total}" --max-time 90 "$url" || true)
+            local url="$1" tries="$2" out="000 0"
+            for i in $(seq 1 "$tries"); do
+              out=$(curl -s -o /dev/null -w "%{http_code} %{time_total}" --max-time 60 "$url" || true)
+              echo "  attempt $i: $url -> $out" >&2
               [ "${out%% *}" = "200" ] && break
-              sleep 20
+              [ "$i" -lt "$tries" ] && sleep 30
             done
             echo "$out"
           }
-          read -r b_code b_time <<< "$(check https://medagent-oewu.onrender.com/health)" || true
-          read -r f_code f_time <<< "$(check https://medagent-rust.vercel.app)" || true
+          # Wake the Render free-tier instance up before measuring
+          curl -s -o /dev/null --max-time 60 https://medagent-oewu.onrender.com/ || true
+          read -r b_code b_time <<< "$(check https://medagent-oewu.onrender.com/health 7)" || true
+          read -r f_code f_time <<< "$(check https://medagent-rust.vercel.app 3)" || true
           echo "backend=${b_code:-000}" >> "$GITHUB_OUTPUT"
 
           f=status/uptime.md
           mkdir -p status
+          # Drop an earlier failed row for today so the backup run can replace it
+          if [ -f "$f" ]; then sed -i "/^| ${{ steps.guard.outputs.today }} |/d" "$f"; fi
           if [ ! -f "$f" ]; then
             {
               echo "# MedAgent uptime log"
