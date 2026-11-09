@@ -9,7 +9,7 @@ Status values: `TODO` · `IN PROGRESS` · `DONE` · `SKIPPED (reason)`
 
 | Day | Focus | Deliverable | Acceptance evidence | Status |
 |---|---|---|---|---|
-| 1 | Baseline audit | `REPO_SCORECARD.md` with facts, gaps and links | No invented score; every item points to a file or check | TODO |
+| 1 | Baseline audit | `REPO_SCORECARD.md` with facts, gaps and links | No invented score; every item points to a file or check | DONE |
 | 2 | README quick start | Clean-clone install and first successful run verified | Commands tested in a fresh environment | TODO |
 | 3 | Repository structure | Document folders, entry points and configuration | Tree agrees with actual files | TODO |
 | 4 | Unit testing | Tests for one core module and one failure path | `npm test` passes; no fabricated coverage | TODO |
